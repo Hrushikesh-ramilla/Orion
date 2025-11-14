@@ -1,19 +1,37 @@
-﻿# Binaries
+﻿# Binaries for programs and plugins
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
 
-# Test binary
+# Test binary, built with `go test -c`
 *.test
 
-# Coverage
+# Output of the go coverage tool
 *.out
 
-# Go workspace
+# Go workspace file
 go.work
 go.work.sum
 
-# Dependencies
+# Dependency directories
 vendor/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Build output
+/bin/
+/dist/
+
+# WAL data file (runtime artifact)
+wal.json
