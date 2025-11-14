@@ -11,11 +11,13 @@ import (
 
 // WalEntry represents a discrete state change in the system.
 type WalEntry struct {
-	Type  string        `json:"type"`
-	Tasks []models.Task `json:"tasks,omitempty"`
+	Type   string        `json:"type"`
+	Tasks  []models.Task `json:"tasks,omitempty"`
+	TaskID string        `json:"task_id,omitempty"`
 }
 
-// WAL provides durable persistence for incoming tasks.
+// WAL provides durable persistence for incoming tasks and state changes.
+// It acts as an append-only newline-delimited JSON log.
 type WAL struct {
 	mu       sync.Mutex
 	filePath string
@@ -33,6 +35,16 @@ func NewWAL(filePath string) (*WAL, error) {
 		filePath: filePath,
 		file:     file,
 	}, nil
+}
+
+// AppendIngest writes a batch of ingested tasks to the WAL.
+func (w *WAL) AppendIngest(tasks []models.Task) error {
+	return w.append(WalEntry{Type: "INGEST", Tasks: tasks})
+}
+
+// AppendComplete logs that a task finished executing successfully.
+func (w *WAL) AppendComplete(taskID string) error {
+	return w.append(WalEntry{Type: "COMPLETE", TaskID: taskID})
 }
 
 // append writes the entry to the file safely.
