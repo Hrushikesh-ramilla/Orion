@@ -19,6 +19,7 @@ func NewHandler(scheduler *engine.Scheduler) http.Handler {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/dag", h.handleSubmitDAG)
+	mux.HandleFunc("/api/v1/status", h.handleStatus)
 	return mux
 }
 
@@ -57,5 +58,21 @@ func (h *Handler) handleSubmitDAG(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":   "accepted",
 		"ingested": len(tasks),
+	})
+}
+
+func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	pending, running, completed := h.scheduler.Metrics()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]int{
+		"pending":   pending,
+		"running":   running,
+		"completed": completed,
 	})
 }
