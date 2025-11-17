@@ -40,20 +40,20 @@ func (d *Dispatcher) Wait() {
 func (d *Dispatcher) worker(ctx context.Context, id int) {
 	defer d.wg.Done()
 	slog.Info("worker online", "worker_id", id)
-
 	for {
 		select {
 		case <-ctx.Done():
 			slog.Info("worker offline (context cancelled)", "worker_id", id)
 			return
-		case task := <-d.scheduler.TaskChan():
+		case task, ok := <-d.scheduler.ReadyTasks():
+			if !ok {
+				slog.Info("worker offline (channel closed)", "worker_id", id)
+				return
+			}
 			log.Println("WORKER: picked task", task.ID)
 			slog.Info("executing task", "worker_id", id, "task_id", task.ID, "payload", task.Payload)
-
-			// Simulate task execution
 			execTime := time.Duration(50+rand.Intn(150)) * time.Millisecond
 			time.Sleep(execTime)
-
 			d.scheduler.Complete(task.ID)
 			log.Println("WORKER: finished task", task.ID)
 			slog.Info("finished task", "worker_id", id, "task_id", task.ID, "duration_ms", execTime.Milliseconds())

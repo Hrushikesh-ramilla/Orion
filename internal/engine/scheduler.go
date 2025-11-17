@@ -24,6 +24,7 @@ type Scheduler struct {
 	taskChan   chan *models.Task
 	ingestChan   chan ingestReq
 	completeChan chan string
+	popReqChan   chan chan *models.Task
 }
 
 func NewScheduler() *Scheduler {
@@ -32,37 +33,60 @@ func NewScheduler() *Scheduler {
 		inDegree:     make(map[string]int),
 		dependents:   make(map[string][]string),
 		readyQueue:   NewPriorityQueue(),
-		taskChan:     make(chan *models.Task, 100),
+		taskChan:     make(chan *models.Task),
 		ingestChan:   make(chan ingestReq),
 		completeChan: make(chan string),
+		popReqChan:   make(chan chan *models.Task),
 	}
 }
 
 func (s *Scheduler) Start(ctx context.Context) {
 	go s.runLoop(ctx)
+	go s.pushLoop(ctx)
 }
 
 func (s *Scheduler) runLoop(ctx context.Context) {
 	for {
+		var activePopReq chan chan *models.Task
+		if s.readyQueue.Len() > 0 {
+			activePopReq = s.popReqChan
+		}
 		select {
+		case req := <-activePopReq:
+			task := s.readyQueue.Dequeue()
+			task.Status = models.StatusRunning
+			req <- task
 		case req := <-s.ingestChan:
 			s.handleIngest(req)
-			s.dispatchReady()
 		case taskID := <-s.completeChan:
 			s.handleComplete(taskID)
-			s.dispatchReady()
 		case <-ctx.Done():
-			close(s.taskChan)
 			return
 		}
 	}
 }
 
-func (s *Scheduler) dispatchReady() {
-	for s.readyQueue.Len() > 0 {
-		task := s.readyQueue.Dequeue()
-		task.Status = models.StatusRunning
-		s.taskChan <- task
+func (s *Scheduler) pushLoop(ctx context.Context) {
+	defer close(s.taskChan)
+	for {
+		req := make(chan *models.Task, 1)
+		select {
+		case s.popReqChan <- req:
+		case <-ctx.Done():
+			return
+		}
+		select {
+		case task := <-req:
+			if task != nil {
+				select {
+				case s.taskChan <- task:
+				case <-ctx.Done():
+					return
+				}
+			}
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
@@ -127,7 +151,7 @@ func (s *Scheduler) Complete(taskID string) {
 	s.completeChan <- taskID
 }
 
-func (s *Scheduler) TaskChan() <-chan *models.Task {
+func (s *Scheduler) ReadyTasks() <-chan *models.Task {
 	return s.taskChan
 }
 
