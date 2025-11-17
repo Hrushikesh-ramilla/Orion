@@ -6,7 +6,6 @@ import (
 	"log"
 	"log/slog"
 	"sync"
-	"time"
 
 	"go-enterprise-scheduler/pkg/models"
 )
@@ -18,15 +17,24 @@ type Scheduler struct {
 	dependents map[string][]string
 	readyQueue *PriorityQueue
 	taskChan   chan *models.Task
+	ingestChan chan ingestReq
+	completeChan chan string
+}
+
+type ingestReq struct {
+	tasks []models.Task
+	resp  chan error
 }
 
 func NewScheduler() *Scheduler {
 	return &Scheduler{
-		tasks:      make(map[string]*models.Task),
-		inDegree:   make(map[string]int),
-		dependents: make(map[string][]string),
-		readyQueue: NewPriorityQueue(),
-		taskChan:   make(chan *models.Task, 100),
+		tasks:        make(map[string]*models.Task),
+		inDegree:     make(map[string]int),
+		dependents:   make(map[string][]string),
+		readyQueue:   NewPriorityQueue(),
+		taskChan:     make(chan *models.Task, 100),
+		ingestChan:   make(chan ingestReq),
+		completeChan: make(chan string),
 	}
 }
 
@@ -35,53 +43,47 @@ func (s *Scheduler) Start(ctx context.Context) {
 }
 
 func (s *Scheduler) runLoop(ctx context.Context) {
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-
 	for {
 		select {
+		case req := <-s.ingestChan:
+			s.handleIngest(req)
+		case taskID := <-s.completeChan:
+			s.handleComplete(taskID)
 		case <-ctx.Done():
 			close(s.taskChan)
 			return
-		case <-ticker.C:
-			s.mu.Lock()
-			if s.readyQueue.Len() > 0 {
-				for s.readyQueue.Len() > 0 {
-					task := s.readyQueue.Dequeue()
-					task.Status = models.StatusRunning
-					s.taskChan <- task
-				}
-			}
-			s.mu.Unlock()
 		}
+		// Push ready tasks after each event
+		s.mu.Lock()
+		for s.readyQueue.Len() > 0 {
+			task := s.readyQueue.Dequeue()
+			task.Status = models.StatusRunning
+			s.taskChan <- task
+		}
+		s.mu.Unlock()
 	}
 }
 
-func (s *Scheduler) Ingest(tasks []models.Task) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+func (s *Scheduler) handleIngest(req ingestReq) {
 	log.Println("SCHED: ingest")
-	for i := range tasks {
-		t := &tasks[i]
+	for i := range req.tasks {
+		t := &req.tasks[i]
 		if _, exists := s.tasks[t.ID]; exists {
-			return fmt.Errorf("scheduler: duplicate task ID %q", t.ID)
+			req.resp <- fmt.Errorf("scheduler: duplicate task ID %q", t.ID)
+			return
 		}
 	}
-
-	for i := range tasks {
-		t := &tasks[i]
+	for i := range req.tasks {
+		t := &req.tasks[i]
 		t.Status = models.StatusPending
 		s.tasks[t.ID] = t
 		s.inDegree[t.ID] = len(t.Dependencies)
-
 		for _, depID := range t.Dependencies {
 			s.dependents[depID] = append(s.dependents[depID], t.ID)
 		}
 	}
-
-	for i := range tasks {
-		t := &tasks[i]
+	for i := range req.tasks {
+		t := &req.tasks[i]
 		if s.inDegree[t.ID] == 0 {
 			t.Status = models.StatusReady
 			s.readyQueue.Enqueue(t)
@@ -89,23 +91,18 @@ func (s *Scheduler) Ingest(tasks []models.Task) error {
 			slog.Info("task ready", "task_id", t.ID, "reason", "no_dependencies")
 		}
 	}
-	return nil
+	req.resp <- nil
 }
 
-func (s *Scheduler) Complete(taskID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+func (s *Scheduler) handleComplete(taskID string) {
+	log.Println("SCHED: complete")
 	task, exists := s.tasks[taskID]
 	if !exists {
 		slog.Warn("attempted to complete unknown task", "task_id", taskID)
 		return
 	}
-
 	task.Status = models.StatusCompleted
-	log.Println("SCHED: complete")
 	slog.Info("task completed", "task_id", taskID)
-
 	for _, depID := range s.dependents[taskID] {
 		s.inDegree[depID]--
 		if s.inDegree[depID] == 0 {
@@ -116,6 +113,16 @@ func (s *Scheduler) Complete(taskID string) {
 			slog.Info("task ready", "task_id", depID, "reason", "deps_satisfied")
 		}
 	}
+}
+
+func (s *Scheduler) Ingest(tasks []models.Task) error {
+	req := ingestReq{tasks: tasks, resp: make(chan error, 1)}
+	s.ingestChan <- req
+	return <-req.resp
+}
+
+func (s *Scheduler) Complete(taskID string) {
+	s.completeChan <- taskID
 }
 
 func (s *Scheduler) TaskChan() <-chan *models.Task {
