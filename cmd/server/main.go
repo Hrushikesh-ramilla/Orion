@@ -39,6 +39,24 @@ func main() {
 	scheduler.Start(ctx)
 	slog.Info("DAG scheduler event loop started")
 
+	// Replay WAL
+	entries, err := wal.Recover()
+	if err != nil {
+		slog.Error("WAL recovery failed", "error", err)
+		os.Exit(1)
+	}
+	if len(entries) > 0 {
+		slog.Info("recovering WAL events", "count", len(entries))
+		for _, entry := range entries {
+			if entry.Type == "INGEST" {
+				_ = scheduler.Ingest(entry.Tasks)
+			}
+		}
+		slog.Info("WAL recovery complete")
+	} else {
+		slog.Info("WAL is clean -- no tasks to recover")
+	}
+
 	scheduler.StartDispatch(ctx)
 	slog.Info("DAG dispatch loop started")
 
@@ -57,6 +75,8 @@ func main() {
 
 	go func() {
 		slog.Info("HTTP server listening", "port", 8080)
+		slog.Info("POST /api/v1/dag -> Submit a task DAG")
+		slog.Info("GET  /api/v1/status -> System metrics")
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("HTTP server error", "error", err)
 			os.Exit(1)
