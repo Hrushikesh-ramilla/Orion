@@ -64,7 +64,7 @@ func main() {
 	dispatcher.Start(ctx)
 	slog.Info("dispatcher started", "workers", engine.DefaultWorkerCount)
 
-	handler := api.NewHandler(scheduler)
+	handler := api.NewHandler(scheduler, wal)
 	server := &http.Server{
 		Addr:         ":8080",
 		Handler:      handler,

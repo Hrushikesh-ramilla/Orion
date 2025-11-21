@@ -7,16 +7,17 @@ import (
 	"net/http"
 
 	"go-enterprise-scheduler/internal/engine"
+	"go-enterprise-scheduler/internal/storage"
 	"go-enterprise-scheduler/pkg/models"
 )
 
 type Handler struct {
 	scheduler *engine.Scheduler
+	wal       *storage.WAL
 }
 
-func NewHandler(scheduler *engine.Scheduler) http.Handler {
-	h := &Handler{scheduler: scheduler}
-
+func NewHandler(scheduler *engine.Scheduler, wal *storage.WAL) http.Handler {
+	h := &Handler{scheduler: scheduler, wal: wal}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/dag", h.handleSubmitDAG)
 	mux.HandleFunc("/api/v1/status", h.handleStatus)
@@ -25,6 +26,7 @@ func NewHandler(scheduler *engine.Scheduler) http.Handler {
 
 func (h *Handler) handleSubmitDAG(w http.ResponseWriter, r *http.Request) {
 	log.Println("API: request received")
+	defer log.Println("API: request completed")
 
 	if r.Method != http.MethodPost {
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
@@ -45,6 +47,13 @@ func (h *Handler) handleSubmitDAG(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// WAL first â€” write-ahead guarantee
+	if err := h.wal.AppendIngest(tasks); err != nil {
+		slog.Error("WAL ingest failed", "error", err)
+		http.Error(w, `{"error":"persistence failure"}`, http.StatusInternalServerError)
+		return
+	}
+
 	if err := h.scheduler.Ingest(tasks); err != nil {
 		slog.Error("scheduler ingest failed", "error", err)
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
@@ -52,12 +61,10 @@ func (h *Handler) handleSubmitDAG(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("accepted tasks into the DAG", "count", len(tasks))
-
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":   "accepted",
-		"ingested": len(tasks),
+		"status": "accepted", "ingested": len(tasks),
 	})
 }
 
@@ -66,13 +73,9 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 		return
 	}
-
 	pending, running, completed := h.scheduler.Metrics()
-
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]int{
-		"pending":   pending,
-		"running":   running,
-		"completed": completed,
+		"pending": pending, "running": running, "completed": completed,
 	})
 }
