@@ -7,19 +7,23 @@ import (
 	"math/rand"
 	"sync"
 	"time"
+
+	"go-enterprise-scheduler/internal/storage"
 )
 
 const DefaultWorkerCount = 4
 
 type Dispatcher struct {
 	scheduler   *Scheduler
+	wal         *storage.WAL
 	workerCount int
 	wg          sync.WaitGroup
 }
 
-func NewDispatcher(scheduler *Scheduler, workerCount int) *Dispatcher {
+func NewDispatcher(scheduler *Scheduler, wal *storage.WAL, workerCount int) *Dispatcher {
 	return &Dispatcher{
 		scheduler:   scheduler,
+		wal:         wal,
 		workerCount: workerCount,
 	}
 }
@@ -51,9 +55,34 @@ func (d *Dispatcher) worker(ctx context.Context, id int) {
 				return
 			}
 			log.Println("WORKER: picked task", task.ID)
+			task.StartTime = time.Now()
 			slog.Info("executing task", "worker_id", id, "task_id", task.ID, "payload", task.Payload)
+
 			execTime := time.Duration(50+rand.Intn(150)) * time.Millisecond
-			time.Sleep(execTime)
+			if task.Payload == "sleep" {
+				execTime = 2000 * time.Millisecond
+			}
+
+			select {
+			case <-time.After(execTime):
+				if task.Payload == "fail" {
+					slog.Warn("simulated failure", "worker_id", id, "task_id", task.ID)
+					if err := d.wal.AppendFail(task.ID); err != nil {
+						slog.Error("failed to write fail event to WAL", "worker_id", id, "error", err)
+						continue
+					}
+					d.scheduler.Fail(task.ID)
+					continue
+				}
+			case <-ctx.Done():
+				slog.Warn("interrupted during execution", "worker_id", id, "task_id", task.ID)
+				return
+			}
+
+			task.EndTime = time.Now()
+			if err := d.wal.AppendComplete(task.ID); err != nil {
+				slog.Error("failed to write completion to WAL", "worker_id", id, "error", err)
+			}
 			d.scheduler.Complete(task.ID)
 			log.Println("WORKER: finished task", task.ID)
 			slog.Info("finished task", "worker_id", id, "task_id", task.ID, "duration_ms", execTime.Milliseconds())

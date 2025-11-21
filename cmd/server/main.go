@@ -60,7 +60,7 @@ func main() {
 	scheduler.StartDispatch(ctx)
 	slog.Info("DAG dispatch loop started")
 
-	dispatcher := engine.NewDispatcher(scheduler, engine.DefaultWorkerCount)
+	dispatcher := engine.NewDispatcher(scheduler, wal, engine.DefaultWorkerCount)
 	dispatcher.Start(ctx)
 	slog.Info("dispatcher started", "workers", engine.DefaultWorkerCount)
 
