@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"time"
 
 	"go-enterprise-scheduler/pkg/models"
 )
@@ -19,11 +20,13 @@ type Scheduler struct {
 	inDegree   map[string]int
 	dependents map[string][]string
 	readyQueue *PriorityQueue
-	readyChan  chan *models.Task
 
 	ingestChan   chan ingestReq
 	completeChan chan string
+	failChan     chan string
 	popReqChan   chan chan *models.Task
+	retryChan    chan string
+	readyChan    chan *models.Task
 }
 
 func NewScheduler() *Scheduler {
@@ -32,10 +35,12 @@ func NewScheduler() *Scheduler {
 		inDegree:     make(map[string]int),
 		dependents:   make(map[string][]string),
 		readyQueue:   NewPriorityQueue(),
-		readyChan:    make(chan *models.Task),
 		ingestChan:   make(chan ingestReq),
 		completeChan: make(chan string),
+		failChan:     make(chan string),
 		popReqChan:   make(chan chan *models.Task),
+		retryChan:    make(chan string),
+		readyChan:    make(chan *models.Task),
 	}
 }
 
@@ -60,12 +65,18 @@ func (s *Scheduler) runLoop(ctx context.Context) {
 		select {
 		case req := <-activePopReq:
 			task := s.readyQueue.Dequeue()
-			task.Status = models.StatusRunning
+			if task != nil {
+				task.Status = models.StatusRunning
+			}
 			req <- task
 		case req := <-s.ingestChan:
 			s.handleIngest(req)
 		case taskID := <-s.completeChan:
 			s.handleComplete(taskID)
+		case taskID := <-s.failChan:
+			s.handleFailure(taskID)
+		case taskID := <-s.retryChan:
+			s.handleRetryEnqueue(taskID)
 		case <-ctx.Done():
 			return
 		}
@@ -108,6 +119,9 @@ func (s *Scheduler) handleIngest(req ingestReq) {
 	for i := range req.tasks {
 		t := &req.tasks[i]
 		t.Status = models.StatusPending
+		if t.MaxRetries == 0 {
+			t.MaxRetries = 3
+		}
 		s.tasks[t.ID] = t
 		s.inDegree[t.ID] = len(t.Dependencies)
 		for _, depID := range t.Dependencies {
@@ -147,15 +161,45 @@ func (s *Scheduler) handleComplete(taskID string) {
 	}
 }
 
+func (s *Scheduler) handleFailure(taskID string) {
+	task, exists := s.tasks[taskID]
+	if !exists { return }
+
+	if task.RetryCount < task.MaxRetries {
+		task.RetryCount++
+		delay := time.Duration(1<<task.RetryCount) * time.Second
+		if delay > 30*time.Second {
+			delay = 30 * time.Second
+		}
+		slog.Warn("task failed, retrying", "task_id", taskID, "delay", delay.String(), "attempt", task.RetryCount)
+		task.Status = models.StatusPending
+		time.AfterFunc(delay, func() {
+			s.retryChan <- taskID
+		})
+	} else {
+		task.Status = models.StatusFailed
+		slog.Error("task failed permanently", "task_id", taskID)
+	}
+}
+
+func (s *Scheduler) handleRetryEnqueue(taskID string) {
+	task, exists := s.tasks[taskID]
+	if !exists { return }
+	if task.Status == models.StatusPending {
+		task.Status = models.StatusReady
+		s.readyQueue.Enqueue(task)
+		slog.Info("task ready for retry", "task_id", taskID)
+	}
+}
+
 func (s *Scheduler) Ingest(tasks []models.Task) error {
 	req := ingestReq{tasks: tasks, resp: make(chan error, 1)}
 	s.ingestChan <- req
 	return <-req.resp
 }
 
-func (s *Scheduler) Complete(taskID string) {
-	s.completeChan <- taskID
-}
+func (s *Scheduler) Complete(taskID string) { s.completeChan <- taskID }
+func (s *Scheduler) Fail(taskID string)     { s.failChan <- taskID }
 
 func (s *Scheduler) Metrics() (pending, running, completed int) {
 	for _, t := range s.tasks {
