@@ -1,4 +1,4 @@
-﻿# Binaries for programs and plugins
+# Binaries for programs and plugins
 *.exe
 *.exe~
 *.dll
@@ -35,3 +35,8 @@ Thumbs.db
 
 # WAL data file (runtime artifact)
 wal.json
+
+# Logs and test output
+*.log
+*.txt
+test_dag.json
