@@ -1,0 +1,12 @@
+﻿services:
+  scheduler:
+    build: .
+    container_name: dag-scheduler
+    ports:
+      - "8080:8080"
+    volumes:
+      - wal-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  wal-data:
